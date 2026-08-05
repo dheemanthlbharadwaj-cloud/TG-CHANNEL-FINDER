@@ -48,6 +48,7 @@ jobs:
         run: python finder.py
 
       - name: Persist state.json
+        if: always()   # save crawl progress even if the finder step errored
         run: |
           git config user.name "neet-finder-bot"
           git config user.email "actions@github.com"

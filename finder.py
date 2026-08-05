@@ -177,8 +177,10 @@ async def get_creator(client, entity):
                 return users.get(p.user_id)
         if res.participants:
             return users.get(res.participants[0].user_id)
-    except RPCError as e:
-        print(f"[warn] admin lookup failed for {getattr(entity, 'username', entity.id)}: {e}")
+    except RPCError:
+        # Expected for channels we don't own -- Telegram forbids reading the
+        # admin list. We fall back to a contact @handle from the About text.
+        pass
     return None
 
 
@@ -261,7 +263,13 @@ async def send_outreach(client, chat, creator, about, state):
 
     for target in targets:
         try:
-            entity = target if not isinstance(target, str) else await client.get_entity(target)
+            # get_entity raises a bare ValueError (not an RPCError) when a
+            # parsed @handle isn't a real username -- treat as unreachable.
+            try:
+                entity = target if not isinstance(target, str) else await client.get_entity(target)
+            except (ValueError, TypeError):
+                state["dm_failed"][cid] = "bad_handle"
+                continue
             if getattr(entity, "id", None) == state["_me_id"]:
                 continue
             await client.send_message(entity, msg, link_preview=False)
@@ -338,20 +346,24 @@ async def outreach_pass(client, state):
             break
         ref = info.get("username") or info["id"]
         try:
-            chat = await client.get_entity(ref)
-        except (ValueError, RPCError) as e:
-            print(f"[warn] outreach resolve failed for {ref}: {e}")
+            try:
+                chat = await client.get_entity(ref)
+            except (ValueError, RPCError) as e:
+                print(f"[warn] outreach resolve failed for {ref}: {e}")
+                continue
+            try:
+                full = await client(GetFullChannelRequest(chat))
+                about = full.full_chat.about
+            except RPCError:
+                about = " ".join(f"@{h}" for h in info.get("contacts", []))
+            # Membership (no-op / no join budget spent if already joined) lets
+            # us read the creator for a direct DM.
+            joined = await safe_join(client, chat, state)
+            creator = await get_creator(client, chat) if joined else None
+            await send_outreach(client, chat, creator, about, state)
+        except Exception as e:  # one bad target must never kill the whole pass
+            print(f"[warn] outreach failed for {ref}: {type(e).__name__}: {e}")
             continue
-        try:
-            full = await client(GetFullChannelRequest(chat))
-            about = full.full_chat.about
-        except RPCError:
-            about = " ".join(f"@{h}" for h in info.get("contacts", []))
-        # Membership (no-op / no join budget spent if already joined) lets us
-        # read the creator for a direct DM.
-        joined = await safe_join(client, chat, state)
-        creator = await get_creator(client, chat) if joined else None
-        await send_outreach(client, chat, creator, about, state)
 
 
 async def reseed_queue(client, state):
@@ -503,6 +515,12 @@ async def main():
 
         _persist(state)
     finally:
+        # Save whatever we accumulated even if the run raised, so crawl
+        # progress and DM de-dup state are never lost.
+        try:
+            _persist(state)
+        except Exception as e:
+            print(f"[warn] final state save failed: {type(e).__name__}: {e}")
         await client.disconnect()
 
 
