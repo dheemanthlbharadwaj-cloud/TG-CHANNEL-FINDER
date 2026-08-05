@@ -3,7 +3,22 @@ name: NEET Channel Finder
 on:
   schedule:
     - cron: "30 23 * * *"   # 23:30 UTC = 5:00 AM IST
-  workflow_dispatch: {}       # lets you trigger manually from GitHub UI
+  workflow_dispatch:
+    inputs:
+      send_digest:
+        description: "Send the accumulated match digest to Saved Messages"
+        type: boolean
+        default: false
+      send_dms:
+        description: "Send cross-promotion DMs to matched channel admins"
+        type: boolean
+        default: false
+
+# Only one finder run at a time: concurrent runs would race on state.json and
+# could double-send DMs.
+concurrency:
+  group: neet-finder
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -18,13 +33,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install telethon
+      - run: pip install -r requirements.txt
 
       - name: Run finder
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+          # Scheduled runs crawl silently. On a manual dispatch you choose
+          # whether to also send the digest and/or the outreach DMs.
+          SEND_DIGEST: ${{ github.event.inputs.send_digest || 'false' }}
+          SEND_DMS: ${{ github.event.inputs.send_dms || 'false' }}
+          OWN_CHANNEL: bioneettraps
         run: python finder.py
 
       - name: Persist state.json
